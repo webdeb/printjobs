@@ -22,8 +22,24 @@ services:
     volumes:
       # Persistent SQLite Database & camera snapshot cache
       - ./data:/data
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
     # TIPP: Auf Linux-Servern kann 'network_mode: host' aktiviert werden,
     # um automatische SSDP-Multicast-Erkennung für Bambu-Drucker im LAN zu ermöglichen.
     # (In dem Fall die 'ports:'-Sektion oben auskommentieren).
     network_mode: host
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: printjobs-watchtower
+    restart: unless-stopped
+    environment:
+      # Nur Container mit dem Label 'com.centurylinklabs.watchtower.enable=true' updaten
+      - WATCHTOWER_LABEL_ENABLE=true
+      # Alte, nicht mehr genutzte Images automatisch aufräumen
+      - WATCHTOWER_CLEANUP=true
+      # Prüf-Intervall in Sekunden (300 = alle 5 Minuten)
+      - WATCHTOWER_POLL_INTERVAL=${WATCHTOWER_POLL_INTERVAL:-300}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
