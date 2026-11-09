@@ -10,6 +10,8 @@ COPY package*.json ./
 RUN npm ci
 
 # Copy full source and build Vite frontend
+ARG VITE_GIT_COMMIT=""
+ENV VITE_GIT_COMMIT=${VITE_GIT_COMMIT}
 COPY . .
 RUN npm run build
 

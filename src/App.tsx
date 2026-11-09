@@ -13,7 +13,10 @@ import { AddPrinterModal } from './components/AddPrinterModal.tsx';
 import { AddJobModal } from './components/AddJobModal.tsx';
 import { AssignUserModal } from './components/AssignUserModal.tsx';
 import { Printer, PrintJob } from './types/index.ts';
-import { Plus, Radio, ShieldAlert, Wrench } from 'lucide-react';
+import { GitCommitHorizontal, Plus, Radio, ShieldAlert, Wrench } from 'lucide-react';
+
+declare const __APP_VERSION__: string;
+declare const __COMMIT_HASH__: string;
 
 export function App() {
   const {
@@ -294,6 +297,32 @@ export function App() {
         </Routes>
 
       </main>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-900 bg-slate-950/80 py-4 mt-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-slate-400">PrintJobs</span>
+            <span>&middot;</span>
+            <span>Makerspace 3D-Drucker Verwaltung</span>
+          </div>
+          <div className="flex items-center gap-2 font-mono text-[11px]">
+            <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
+              v{typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.0.0'}
+            </span>
+            <a
+              href={`https://github.com/webdeb/printjobs/commit/${typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : ''}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 hover:text-emerald-400 hover:border-emerald-500/30 transition-colors"
+              title="Commit auf GitHub ansehen"
+            >
+              <GitCommitHorizontal className="h-3 w-3" />
+              {typeof __COMMIT_HASH__ !== 'undefined' ? __COMMIT_HASH__ : 'dev'}
+            </a>
+          </div>
+        </div>
+      </footer>
 
       {/* Modals */}
       {showAddPrinterModal && (
