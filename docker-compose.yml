@@ -35,6 +35,8 @@ services:
     container_name: printjobs-watchtower
     restart: unless-stopped
     environment:
+      # Kompatibilität mit aktuellen Docker Engine Versionen (25+)
+      - DOCKER_API_VERSION=1.44
       # Nur Container mit dem Label 'com.centurylinklabs.watchtower.enable=true' updaten
       - WATCHTOWER_LABEL_ENABLE=true
       # Alte, nicht mehr genutzte Images automatisch aufräumen
