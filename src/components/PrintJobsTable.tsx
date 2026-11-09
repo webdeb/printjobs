@@ -81,11 +81,11 @@ export const PrintJobsTable: React.FC<PrintJobsTableProps> = ({
     const totalG = meta.totalGrams || (job.material_used_grams > 0 ? job.material_used_grams : 40.0);
     setBaseTotalGrams(totalG);
 
-    const currentG = job.material_used_grams > 0 ? job.material_used_grams : totalG;
+    const currentG = job.material_used_grams !== undefined && job.material_used_grams !== null ? job.material_used_grams : totalG;
     setEditGrams(currentG.toFixed(1));
 
     const rate = getPricePer100g(mat);
-    const cost = job.cost_cents > 0 ? (job.cost_cents / 100).toFixed(2) : ((currentG / 100) * rate).toFixed(2);
+    const cost = job.cost_cents !== undefined && job.cost_cents !== null ? (job.cost_cents / 100).toFixed(2) : ((currentG / 100) * rate).toFixed(2);
     setEditCostEur(cost);
   };
 
@@ -370,10 +370,10 @@ export const PrintJobsTable: React.FC<PrintJobsTableProps> = ({
                           } catch {}
 
                           const totalG = meta.totalGrams || (job.material_used_grams > 0 ? job.material_used_grams : 40.0);
-                          const progress = meta.progressPercent !== undefined ? meta.progressPercent : (isRunning ? 25 : 100);
-                          const displayGrams = job.material_used_grams > 0 
-                            ? job.material_used_grams 
-                            : (isRunning ? Math.max(0.5, Math.round((totalG * Math.max(progress, 5) / 100) * 10) / 10) : totalG);
+                          const progress = meta.progressPercent !== undefined ? meta.progressPercent : (isRunning ? 0 : (isCompleted ? 100 : 0));
+                          const displayGrams = (job.material_used_grams !== undefined && job.material_used_grams !== null)
+                            ? job.material_used_grams
+                            : (isCompleted ? totalG : Math.round((totalG * (progress / 100)) * 10) / 10);
 
                           return (
                             <div className="flex items-center justify-between gap-2">
@@ -382,14 +382,9 @@ export const PrintJobsTable: React.FC<PrintJobsTableProps> = ({
                                   <span className="font-bold text-slate-100 text-xs font-mono">
                                     {displayGrams.toFixed(1)} g
                                   </span>
-                                  {isRunning && (
+                                  {(isRunning || isCancelled || isFailed) && (
                                     <span className="text-[10px] text-slate-500 font-mono">
                                       / ~{totalG.toFixed(0)}g
-                                    </span>
-                                  )}
-                                  {isFailed && (
-                                    <span className="text-[10px] text-rose-400 font-medium">
-                                      (Abbruch)
                                     </span>
                                   )}
                                 </div>
@@ -397,8 +392,12 @@ export const PrintJobsTable: React.FC<PrintJobsTableProps> = ({
                                   <span className="text-[11px] text-emerald-400 font-mono font-bold">
                                     {((job.cost_cents || 0) / 100).toFixed(2)} €
                                   </span>
-                                  {isRunning && progress !== undefined && (
-                                    <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-300 font-mono font-bold">
+                                  {(isRunning || isCancelled || isFailed) && progress !== undefined && (
+                                    <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                                      isRunning
+                                        ? 'bg-emerald-500/15 text-emerald-300'
+                                        : 'bg-amber-500/15 text-amber-300'
+                                    }`}>
                                       {progress}%
                                     </span>
                                   )}

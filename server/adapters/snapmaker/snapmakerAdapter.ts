@@ -155,6 +155,12 @@ export class SnapmakerAdapter implements PrinterAdapter {
               jobName: filename,
               materialType: matType,
               materialColorHex: matColor,
+              metadata: {
+                progressPercent: progress,
+                currentLayer: telemetry.current_layer,
+                totalLayers: telemetry.total_layers,
+                remainingMinutes: telemetry.remaining_minutes,
+              },
             });
           }
         } else {
@@ -165,6 +171,12 @@ export class SnapmakerAdapter implements PrinterAdapter {
               printerId,
               jobName: filename,
               durationSeconds: printDuration,
+              metadata: {
+                progressPercent: progress,
+                currentLayer: telemetry.current_layer,
+                totalLayers: telemetry.total_layers,
+                remainingMinutes: telemetry.remaining_minutes,
+              },
             });
           }
         }
@@ -187,6 +199,11 @@ export class SnapmakerAdapter implements PrinterAdapter {
             printerId,
             jobName: finishedFilename,
             durationSeconds: printDuration,
+            metadata: {
+              progressPercent: progress,
+              currentLayer: telemetry.current_layer,
+              totalLayers: telemetry.total_layers,
+            },
           });
         }
       }

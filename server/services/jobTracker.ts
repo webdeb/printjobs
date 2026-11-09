@@ -28,6 +28,25 @@ export function broadcastEvent(type: string, data: any): void {
 }
 
 export class JobTracker {
+  private computeEffectivePercent(meta: Record<string, any>): number {
+    const rawPercent = meta.progressPercent !== undefined && !isNaN(Number(meta.progressPercent))
+      ? Number(meta.progressPercent)
+      : 0;
+    const currentLayer = Number(meta.currentLayer) || 0;
+    const totalLayers = Number(meta.totalLayers) || 0;
+
+    if (totalLayers > 0 && currentLayer >= 0) {
+      const layerPercent = Math.min(100, Math.round((currentLayer / totalLayers) * 100));
+      // If printer reported a stale 99-100% while still at the very beginning of layers, trust the layer ratio
+      if (rawPercent >= 99 && currentLayer <= 2 && totalLayers > 5) {
+        return layerPercent;
+      }
+      return Math.max(rawPercent, layerPercent);
+    }
+
+    return Math.min(100, Math.max(0, rawPercent));
+  }
+
   start(): void {
     // Listen to telemetry updates
     adapterManager.onTelemetry((printerId, telemetry) => {
@@ -86,8 +105,15 @@ export class JobTracker {
           if (oldJob.metadata_json) oldMeta = JSON.parse(oldJob.metadata_json);
         } catch {}
         const durationSec = Math.round((Date.now() - new Date(oldJob.start_time).getTime()) / 1000);
-        const finalGrams = oldJob.material_used_grams || 1;
-        const costCents = oldJob.cost_cents || calculateCostCents(oldJob.material_type, finalGrams);
+        const totalGrams = oldMeta.totalGrams || estimateJobGrams(oldJob.job_name, oldMeta.totalLayers, oldMeta.remainingMinutes);
+        const effectivePct = this.computeEffectivePercent(oldMeta);
+        const finalGrams = oldMeta.manualOverride
+          ? oldJob.material_used_grams
+          : (effectivePct <= 0 ? 0 : Math.round((totalGrams * (effectivePct / 100)) * 10) / 10);
+        const costCents = oldMeta.manualOverride
+          ? oldJob.cost_cents
+          : calculateCostCents(oldJob.material_type, finalGrams);
+        oldMeta.progressPercent = effectivePct;
         oldMeta.finalStatus = 'cancelled';
 
         db.prepare(`
@@ -118,8 +144,14 @@ export class JobTracker {
           event.metadata?.totalLayers,
           event.metadata?.remainingMinutes
         );
-        const progressPercent = Number(event.metadata?.progressPercent) || 0;
-        const usedGrams = Math.max(0.5, Math.round((totalGrams * Math.max(progressPercent, 5) / 100) * 10) / 10);
+        const metaCandidate = {
+          ...(event.metadata || {}),
+          totalGrams,
+        };
+        const progressPercent = this.computeEffectivePercent(metaCandidate);
+        const usedGrams = progressPercent <= 0
+          ? 0
+          : Math.round((totalGrams * (progressPercent / 100)) * 10) / 10;
         let materialType = event.materialType || 'PLA';
         let materialColorHex = event.materialColorHex || '#10B981';
         const upper = event.jobName.toUpperCase();
@@ -187,15 +219,16 @@ export class JobTracker {
           event.metadata?.totalLayers,
           event.metadata?.remainingMinutes
         );
-        const incomingPercent = event.metadata?.progressPercent !== undefined && !isNaN(Number(event.metadata.progressPercent))
-          ? Number(event.metadata.progressPercent)
-          : undefined;
+        const mergedMeta = {
+          ...meta,
+          ...(event.metadata || {}),
+          totalGrams,
+        };
+        const incomingEffective = this.computeEffectivePercent(mergedMeta);
 
         // Never let progressPercent go backwards during a running job!
         const currentPercent = Number(meta.progressPercent) || 0;
-        const progressPercent = (incomingPercent !== undefined && incomingPercent > 0)
-          ? Math.max(incomingPercent, currentPercent)
-          : currentPercent;
+        const progressPercent = Math.max(incomingEffective, currentPercent);
 
         // If manualOverride is active, preserve user's weight & cost
         let usedGrams = runningJob.material_used_grams || 0;
@@ -203,15 +236,13 @@ export class JobTracker {
         const materialType = event.materialType || runningJob.material_type || 'PLA';
 
         if (!meta.manualOverride) {
-          // Pro-rate material used by current print progress, strictly monotonic
-          const calcGrams = Math.max(
-            0.5,
-            Math.round((totalGrams * Math.max(progressPercent, 1) / 100) * 10) / 10
-          );
-          usedGrams = event.materialUsedGrams || Math.max(
-            runningJob.material_used_grams || 0,
-            calcGrams
-          );
+          // Pro-rate material used by current print progress
+          const calcGrams = progressPercent <= 0
+            ? 0
+            : Math.round((totalGrams * (progressPercent / 100)) * 10) / 10;
+          usedGrams = event.materialUsedGrams !== undefined
+            ? event.materialUsedGrams
+            : Math.max(runningJob.material_used_grams || 0, calcGrams);
           costCents = calculateCostCents(materialType, usedGrams);
         } else {
           // Keep existing cost if manual override
@@ -220,8 +251,7 @@ export class JobTracker {
         }
 
         const updatedMeta = {
-          ...meta,
-          ...(event.metadata || {}),
+          ...mergedMeta,
           totalGrams,
           progressPercent,
         };
@@ -258,7 +288,12 @@ export class JobTracker {
 
         const durationSec = event.durationSeconds || Math.round((Date.now() - new Date(runningJob.start_time).getTime()) / 1000);
         const materialType = event.materialType || runningJob.material_type || 'PLA';
-        const totalGrams = meta.totalGrams || estimateJobGrams(event.jobName);
+        const mergedMeta = {
+          ...meta,
+          ...(event.metadata || {}),
+        };
+        const totalGrams = mergedMeta.totalGrams || estimateJobGrams(event.jobName, mergedMeta.totalLayers, mergedMeta.remainingMinutes);
+        const progressPercent = Math.max(Number(meta.progressPercent) || 0, this.computeEffectivePercent(mergedMeta));
 
         let finalGrams: number;
         if (meta.manualOverride) {
@@ -266,18 +301,20 @@ export class JobTracker {
         } else if (event.type === 'completed') {
           finalGrams = event.materialUsedGrams || totalGrams;
         } else {
-          // If aborted/failed, pro-rate by progress reached (e.g. 70%)
-          const progressPercent = meta.progressPercent || 50;
-          finalGrams = event.materialUsedGrams || Math.max(runningJob.material_used_grams || 1, Math.round((totalGrams * (progressPercent / 100)) * 10) / 10);
+          // If cancelled/failed, pro-rate strictly by actual progress reached (0% -> 0g, no 50% fallback!)
+          finalGrams = event.materialUsedGrams !== undefined
+            ? event.materialUsedGrams
+            : (progressPercent <= 0 ? 0 : Math.round((totalGrams * (progressPercent / 100)) * 10) / 10);
         }
 
         const costCents = meta.manualOverride
-          ? (db.prepare('SELECT cost_cents FROM print_jobs WHERE id = ?').get(runningJob.id) as any)?.cost_cents || calculateCostCents(materialType, finalGrams)
+          ? (db.prepare('SELECT cost_cents FROM print_jobs WHERE id = ?').get(runningJob.id) as any)?.cost_cents ?? calculateCostCents(materialType, finalGrams)
           : calculateCostCents(materialType, finalGrams);
 
         const updatedMeta = {
-          ...meta,
+          ...mergedMeta,
           totalGrams,
+          progressPercent: event.type === 'completed' ? 100 : progressPercent,
           finalStatus: event.type,
         };
 

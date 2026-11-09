@@ -176,20 +176,29 @@ export class BambuLabAdapter implements PrinterAdapter {
     const rawGcode = print.gcode_state ? print.gcode_state.toUpperCase() : null;
     const gcodeState = rawGcode || (conn?.lastState || 'IDLE');
     const subtaskName = print.subtask_name || (conn?.lastSubtask || 'Print Job');
+    const isPrintingNow = ['RUNNING', 'PREPARE'].includes(gcodeState);
 
     if (conn) {
-      if (print.subtask_name && conn.lastSubtask && conn.lastSubtask !== print.subtask_name) {
-        // New job subtask started
-        conn.lastPercent = undefined;
+      const isNewJobTransition = isPrintingNow && (!conn.isCurrentlyTrackingJob || (conn.lastSubtask && conn.lastSubtask !== subtaskName));
+
+      if (isNewJobTransition) {
+        // Reset cached progress metrics when a new print job starts (even if same filename!)
+        conn.lastPercent = 0;
         conn.lastRemainingMins = undefined;
-        conn.lastLayer = undefined;
+        conn.lastLayer = 0;
         conn.lastTotalLayers = undefined;
       }
 
       if (print.mc_percent !== undefined && print.mc_percent !== null && !isNaN(Number(print.mc_percent))) {
         const val = Number(print.mc_percent);
-        if (val > 0 || conn.lastPercent === undefined) {
-          conn.lastPercent = Math.max(val, conn.lastPercent || 0);
+        // During PREPARE or at start of a new job, Bambu may briefly report stale 100% from the previous print
+        const isStale100 = (gcodeState === 'PREPARE' || isNewJobTransition) && val >= 99 && (Number(print.layer_num) || 0) <= 1;
+        if (!isStale100) {
+          if (isPrintingNow) {
+            conn.lastPercent = Math.max(val, conn.lastPercent || 0);
+          } else {
+            conn.lastPercent = val;
+          }
         }
       }
       if (print.mc_remaining_time !== undefined && print.mc_remaining_time !== null && !isNaN(Number(print.mc_remaining_time))) {
@@ -200,8 +209,15 @@ export class BambuLabAdapter implements PrinterAdapter {
       }
       if (print.layer_num !== undefined && print.layer_num !== null && !isNaN(Number(print.layer_num))) {
         const lNum = Number(print.layer_num);
-        if (lNum > 0 || conn.lastLayer === undefined) {
-          conn.lastLayer = Math.max(lNum, conn.lastLayer || 0);
+        const totalL = Number(print.total_layer_num) || conn.lastTotalLayers || 0;
+        // Ignore stale layer_num from previous print during PREPARE
+        const isStaleLayer = (gcodeState === 'PREPARE' || isNewJobTransition) && totalL > 0 && lNum >= totalL;
+        if (!isStaleLayer) {
+          if (isPrintingNow) {
+            conn.lastLayer = Math.max(lNum, conn.lastLayer || 0);
+          } else {
+            conn.lastLayer = lNum;
+          }
         }
       }
       if (print.total_layer_num !== undefined && print.total_layer_num !== null && !isNaN(Number(print.total_layer_num)) && Number(print.total_layer_num) > 0) {
@@ -260,8 +276,6 @@ export class BambuLabAdapter implements PrinterAdapter {
 
     // State machine for job detection
     if (conn) {
-      const isPrintingNow = ['RUNNING', 'PREPARE'].includes(gcodeState);
-
       // New job started
       if (isPrintingNow) {
         if (!conn.isCurrentlyTrackingJob || (conn.lastSubtask && conn.lastSubtask !== subtaskName)) {
@@ -332,21 +346,27 @@ export class BambuLabAdapter implements PrinterAdapter {
       // Job failed or cancelled — only if we were actively tracking this running job!
       if (['FAILED', 'CANCELLED'].includes(gcodeState)) {
         if (conn.isCurrentlyTrackingJob) {
-          const durationSec = conn.jobStartTime ? Math.round((Date.now() - conn.jobStartTime) / 1000) : 1800;
+          const durationSec = conn.jobStartTime ? Math.round((Date.now() - conn.jobStartTime) / 1000) : 0;
           conn.isCurrentlyTrackingJob = false;
 
           for (const listener of this.jobEventListeners) {
             listener({
-              type: 'cancelled',
+              type: gcodeState === 'FAILED' ? 'failed' : 'cancelled',
               printerId,
               jobName: subtaskName,
               durationSeconds: durationSec,
+              metadata: {
+                progressPercent: percent,
+                currentLayer,
+                totalLayers,
+                remainingMinutes: remainingMins,
+              },
             });
           }
         }
       } else if (['IDLE', 'INIT'].includes(gcodeState) && conn.isCurrentlyTrackingJob && conn.lastState && ['RUNNING', 'PREPARE', 'PAUSE'].includes(conn.lastState)) {
         // User cancelled print on printer touchscreen or Bambu Handy
-        const durationSec = conn.jobStartTime ? Math.round((Date.now() - conn.jobStartTime) / 1000) : 1800;
+        const durationSec = conn.jobStartTime ? Math.round((Date.now() - conn.jobStartTime) / 1000) : 0;
         conn.isCurrentlyTrackingJob = false;
 
         for (const listener of this.jobEventListeners) {
@@ -355,6 +375,12 @@ export class BambuLabAdapter implements PrinterAdapter {
             printerId,
             jobName: subtaskName,
             durationSeconds: durationSec,
+            metadata: {
+              progressPercent: percent,
+              currentLayer,
+              totalLayers,
+              remainingMinutes: remainingMins,
+            },
           });
         }
       }
