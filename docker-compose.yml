@@ -1,0 +1,29 @@
+services:
+  printjobs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${DOCKER_IMAGE:-ghcr.io/webdeb/printjobs:latest}
+    container_name: printjobs
+    restart: unless-stopped
+    ports:
+      # Web UI & REST API
+      - "${PORT:-3001}:3001"
+      # Bambu SSDP UDP Discovery Ports
+      - "1990:1990/udp"
+      - "2021:2021/udp"
+    environment:
+      - PORT=3001
+      - DB_PATH=/data/printjobs.sqlite
+      - CACHE_DIR=/data/camera_cache
+      # MeTe Member Management System URL & Interval
+      - METE_URL=${METE_URL:-http://192.168.10.194:1337}
+      - METE_SYNC_INTERVAL_MINS=${METE_SYNC_INTERVAL_MINS:-15}
+    volumes:
+      # Persistent SQLite Database & camera snapshot cache
+      - ./data:/data
+
+    # TIPP: Auf Linux-Servern kann 'network_mode: host' aktiviert werden,
+    # um automatische SSDP-Multicast-Erkennung für Bambu-Drucker im LAN zu ermöglichen.
+    # (In dem Fall die 'ports:'-Sektion oben auskommentieren).
+    network_mode: host

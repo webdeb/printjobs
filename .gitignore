@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Local SQLite database & camera snapshot cache
+data/
+camera_cache/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# Environment variables (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# OS & Editor files
+.DS_Store
+*.log
+.idea/
+.vscode/
+
