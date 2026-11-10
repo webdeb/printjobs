@@ -344,3 +344,137 @@ export class JobTracker {
 }
 
 export const jobTracker = new JobTracker();
+
+/**
+ * Recalculates material_used_grams and cost_cents for historical 'cancelled' and 'failed' print jobs
+ * that were previously affected by the stale 100% progress or 50% fallback bugs.
+ * Preserves jobs with manualOverride === true and leaves user assignments untouched.
+ */
+export function recalculateCancelledJobs(force = false): { updatedCount: number; inspectedCount: number } {
+  if (!force) {
+    const alreadyDone = db
+      .prepare("SELECT value FROM settings WHERE key = 'cancelled_jobs_recalculated_v1'")
+      .get() as { value?: string } | undefined;
+    if (alreadyDone?.value === '1') {
+      return { updatedCount: 0, inspectedCount: 0 };
+    }
+  }
+
+  const rows = db
+    .prepare(`
+      SELECT id, job_name, status, duration_seconds, material_type, material_used_grams, cost_cents, metadata_json
+      FROM print_jobs
+      WHERE status IN ('cancelled', 'failed')
+    `)
+    .all() as Array<{
+      id: number;
+      job_name: string;
+      status: string;
+      duration_seconds: number;
+      material_type: string;
+      material_used_grams: number;
+      cost_cents: number;
+      metadata_json?: string;
+    }>;
+
+  const updateStmt = db.prepare(`
+    UPDATE print_jobs
+    SET material_used_grams = ?, cost_cents = ?, metadata_json = ?
+    WHERE id = ?
+  `);
+
+  let updatedCount = 0;
+
+  for (const job of rows) {
+    let meta: Record<string, any> = {};
+    try {
+      if (job.metadata_json) meta = JSON.parse(job.metadata_json);
+    } catch {}
+
+    // Never overwrite jobs that an admin/member explicitly adjusted manually
+    if (meta.manualOverride) continue;
+
+    const durationSec = Math.max(0, Number(job.duration_seconds) || 0);
+    const totalLayers = Number(meta.totalLayers) || 0;
+    let currentLayer = Number(meta.currentLayer) || 0;
+    const remainingMinutes = Number(meta.remainingMinutes) || 0;
+    const rawPercent = meta.progressPercent !== undefined && !isNaN(Number(meta.progressPercent))
+      ? Number(meta.progressPercent)
+      : undefined;
+
+    // Detect & clean stale layer count carried over from a previous larger job (e.g. currentLayer 865 > totalLayers 425)
+    let hadStaleLayer = false;
+    if (totalLayers > 0 && currentLayer >= totalLayers) {
+      hadStaleLayer = true;
+      currentLayer = 0;
+      delete meta.currentLayer;
+    }
+
+    // Recompute totalGrams if missing or if it had been inflated by a stale layer count
+    let totalGrams = Number(meta.totalGrams) || 0;
+    if (!totalGrams || hadStaleLayer) {
+      totalGrams = estimateJobGrams(
+        job.job_name,
+        totalLayers > 0 ? totalLayers : undefined,
+        remainingMinutes > 0 ? remainingMinutes : undefined
+      );
+      meta.totalGrams = totalGrams;
+    }
+
+    let effectivePct = 0;
+
+    if (rawPercent !== undefined && rawPercent > 0 && rawPercent < 99) {
+      // Valid intermediate slicer percentage recorded during the print
+      effectivePct = rawPercent;
+    } else if (rawPercent === 0) {
+      // Cancelled at 0% (unless valid intermediate layer was reached)
+      if (totalLayers > 0 && currentLayer > 0 && currentLayer < totalLayers) {
+        effectivePct = Math.round((currentLayer / totalLayers) * 100);
+      } else {
+        effectivePct = 0;
+      }
+    } else {
+      // Stale 99-100% on a cancelled/failed job, or missing progressPercent: reconstruct from layers or time
+      if (totalLayers > 0 && currentLayer > 0 && currentLayer < totalLayers) {
+        effectivePct = Math.round((currentLayer / totalLayers) * 100);
+      } else if (remainingMinutes > 0) {
+        // Subtract ~3 min warmup/homing from wall-clock duration
+        const printSec = Math.max(0, durationSec - 180);
+        effectivePct = printSec <= 0
+          ? 0
+          : Math.min(95, Math.round((printSec / (printSec + remainingMinutes * 60)) * 100));
+      } else {
+        const estTotalSec = Math.max(600, (totalGrams / 22) * 3600);
+        const printSec = Math.max(0, durationSec - 180);
+        effectivePct = printSec <= 0
+          ? 0
+          : Math.min(95, Math.round((printSec / estTotalSec) * 100));
+      }
+    }
+
+    const newGrams = effectivePct <= 0
+      ? 0
+      : Math.round((totalGrams * (effectivePct / 100)) * 10) / 10;
+    const newCostCents = calculateCostCents(job.material_type || 'PLA', newGrams);
+
+    meta.progressPercent = effectivePct;
+    meta.finalStatus = job.status;
+
+    const newMetaJson = JSON.stringify(meta);
+    if (
+      job.material_used_grams !== newGrams ||
+      job.cost_cents !== newCostCents ||
+      job.metadata_json !== newMetaJson
+    ) {
+      updateStmt.run(newGrams, newCostCents, newMetaJson, job.id);
+      updatedCount++;
+      console.log(
+        `[JobTracker] Recalculated ${job.status} job #${job.id} ("${job.job_name}"): ${job.material_used_grams}g (${(job.cost_cents / 100).toFixed(2)}€) -> ${newGrams}g at ${effectivePct}% (${(newCostCents / 100).toFixed(2)}€)`
+      );
+    }
+  }
+
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cancelled_jobs_recalculated_v1', '1')").run();
+
+  return { updatedCount, inspectedCount: rows.length };
+}

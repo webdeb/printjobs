@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { db } from '../db/database.ts';
-import { broadcastEvent } from '../services/jobTracker.ts';
+import { broadcastEvent, recalculateCancelledJobs } from '../services/jobTracker.ts';
 import { calculateCostCents } from '../services/pricing.ts';
 import { PrintJob } from '../../src/types/index.ts';
 import { maskEmail, requireAdminPin } from '../utils/security.ts';
@@ -196,6 +196,13 @@ jobsRouter.post('/', async (c) => {
 
   broadcastEvent('job_created', { jobId: result.lastInsertRowid });
   return c.json({ success: true, id: result.lastInsertRowid }, 201);
+});
+
+// Recalculate historical cancelled/failed jobs on demand
+jobsRouter.post('/recalculate-cancelled', requireAdminPin, (c) => {
+  const result = recalculateCancelledJobs(true);
+  broadcastEvent('job_finished', { recalculated: result.updatedCount });
+  return c.json({ success: true, ...result });
 });
 
 // Delete a print job (protected by ADMIN_PIN if configured)

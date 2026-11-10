@@ -9,3 +9,4 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 exec "$@"
+

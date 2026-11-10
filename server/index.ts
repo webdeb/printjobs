@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { initDatabase, db } from './db/database.ts';
 import { adapterManager } from './adapters/adapterManager.ts';
-import { jobTracker } from './services/jobTracker.ts';
+import { jobTracker, recalculateCancelledJobs } from './services/jobTracker.ts';
 import { printersRouter } from './routes/printers.ts';
 import { jobsRouter } from './routes/jobs.ts';
 import { usersRouter } from './routes/users.ts';
@@ -35,16 +35,9 @@ app.use('*', async (c, next) => {
   c.header('X-Frame-Options', 'DENY');
   c.header('Referrer-Policy', 'no-referrer');
 
-  let meteOrigin = '';
-  if (process.env.METE_URL) {
-    try {
-      meteOrigin = new URL(process.env.METE_URL).origin;
-    } catch {}
-  }
-  const imgSources = ["'self'", 'data:', 'blob:', meteOrigin].filter(Boolean).join(' ');
   c.header(
     'Content-Security-Policy',
-    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src ${imgSources}; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'`
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
   );
 });
 
@@ -129,6 +122,11 @@ const PORT = Number(process.env.PORT) || 3001;
 async function bootstrap() {
   console.log('[PrintJobs] Initializing SQLite database...');
   initDatabase();
+
+  const recalc = recalculateCancelledJobs(false);
+  if (recalc.updatedCount > 0) {
+    console.log(`[PrintJobs] Repaired ${recalc.updatedCount} of ${recalc.inspectedCount} historical cancelled/failed jobs.`);
+  }
 
   if (isAdminPinConfigured()) {
     console.log('[PrintJobs] Admin-PIN protection is ENABLED for administrative actions.');

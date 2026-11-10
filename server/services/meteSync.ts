@@ -10,32 +10,25 @@ export interface MeteUser {
   email?: string;
 }
 
-function sanitizeScrapedText(input: string): string {
+function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/<[^>]*>/g, '')
-    .replace(/[\u0000-\u001F\u007F]/g, '')
-    .trim()
-    .slice(0, 100);
+    .trim();
 }
 
 /**
- * Validates that an avatar URL uses HTTP(S) and points strictly to the configured MeTe origin,
- * blocking javascript:/data: URIs and external tracking pixels.
+ * Resolves relative MeTe paths and allows any http(s) avatar URL (e.g. Gravatar),
+ * only rejecting non-HTTP schemes like javascript:.
  */
-function sanitizeMeteAvatarUrl(rawSrc: string): string | undefined {
-  if (!METE_URL || !rawSrc) return undefined;
+function resolveAvatarUrl(rawSrc: string): string | undefined {
+  if (!rawSrc) return undefined;
   try {
-    const meteBase = new URL(METE_URL);
-    const resolved = new URL(rawSrc.trim(), meteBase);
+    const resolved = METE_URL ? new URL(rawSrc.trim(), `${METE_URL}/`) : new URL(rawSrc.trim());
     if (!['http:', 'https:'].includes(resolved.protocol)) {
-      return undefined;
-    }
-    if (resolved.origin !== meteBase.origin) {
       return undefined;
     }
     return resolved.toString();
@@ -74,15 +67,15 @@ export async function fetchMeteUsers(): Promise<MeteUser[]> {
 
   let match: RegExpExecArray | null;
   while ((match = cardRegex.exec(html)) !== null) {
-    const name = sanitizeScrapedText(match[1]);
+    const name = decodeHtmlEntities(match[1]);
     const id = match[2].trim();
     const innerHtml = match[3];
-    if (!name || !/^\d{1,12}$/.test(id)) continue;
+    if (!name || !id) continue;
 
     let avatar_url: string | undefined = undefined;
     const imgMatch = innerHtml.match(/src="([^"]+)"/);
     if (imgMatch) {
-      avatar_url = sanitizeMeteAvatarUrl(imgMatch[1]);
+      avatar_url = resolveAvatarUrl(imgMatch[1]);
     }
 
     if (!seen.has(id)) {
