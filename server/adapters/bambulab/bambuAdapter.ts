@@ -2,6 +2,7 @@ import mqtt from 'mqtt';
 import { Printer, PrinterTelemetry, SpoolInfo, DiscoveredPrinter } from '../../../src/types/index.ts';
 import { PrinterAdapter, JobEvent } from '../types.ts';
 import { bambuDiscovery } from './discovery.ts';
+import { validatePort, validatePrinterHost } from '../../utils/security.ts';
 
 interface ConnectedClient {
   client: mqtt.MqttClient;
@@ -48,8 +49,13 @@ export class BambuLabAdapter implements PrinterAdapter {
       return;
     }
 
-    const host = printer.host;
-    const port = printer.port || 8883;
+    const hostCheck = validatePrinterHost(printer.host);
+    const port = validatePort(printer.port, 8883);
+    if (!hostCheck.valid || !port) {
+      console.warn(`[BambuLabAdapter] Skipping printer ${printer.name} due to invalid host/port.`);
+      return;
+    }
+    const host = hostCheck.host;
     const username = 'bblp';
     const password = printer.access_code || '';
 

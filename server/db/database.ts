@@ -26,6 +26,7 @@ export const db = new DatabaseSync(DB_PATH);
 
 export function initDatabase() {
   db.exec(`
+    PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
 
     CREATE TABLE IF NOT EXISTS printers (
@@ -80,7 +81,6 @@ export function initDatabase() {
       cost_cents INTEGER NOT NULL DEFAULT 0,
       is_paid INTEGER NOT NULL DEFAULT 0,
       metadata_json TEXT,
-      FOREIGN KEY(printer_id) REFERENCES printers(id) ON DELETE CASCADE,
       FOREIGN KEY(assigned_user_id) REFERENCES users(id) ON DELETE SET NULL
     );
 
@@ -90,8 +90,7 @@ export function initDatabase() {
       service_type TEXT NOT NULL,
       notes TEXT NOT NULL,
       performed_by TEXT NOT NULL,
-      performed_at TEXT NOT NULL,
-      FOREIGN KEY(printer_id) REFERENCES printers(id) ON DELETE CASCADE
+      performed_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -100,8 +99,109 @@ export function initDatabase() {
     );
   `);
 
+  migrateCascadeConstraints();
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_print_jobs_printer_status ON print_jobs(printer_id, status);
+    CREATE INDEX IF NOT EXISTS idx_print_jobs_user ON print_jobs(assigned_user_id);
+  `);
+
   cleanupMockData();
   seedInitialData();
+}
+
+/**
+ * Safely migrates legacy tables that had FOREIGN KEY(printer_id) ... ON DELETE CASCADE,
+ * preventing accidental deletion of print history and unpaid Materialkasse balances
+ * when a printer is removed.
+ */
+function migrateCascadeConstraints() {
+  try {
+    const jobsSchema = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'print_jobs'")
+      .get() as { sql?: string } | undefined;
+
+    if (jobsSchema?.sql && /REFERENCES\s+printers\s*\(\s*id\s*\)\s+ON\s+DELETE\s+CASCADE/i.test(jobsSchema.sql)) {
+      console.log('[PrintJobs DB] Migrating print_jobs table to remove destructive ON DELETE CASCADE on printer_id...');
+      db.exec('PRAGMA foreign_keys = OFF;');
+      try {
+        db.exec(`
+          BEGIN TRANSACTION;
+          CREATE TABLE print_jobs_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            printer_id TEXT NOT NULL,
+            job_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT,
+            duration_seconds INTEGER NOT NULL DEFAULT 0,
+            material_type TEXT NOT NULL DEFAULT 'PLA',
+            material_color_hex TEXT NOT NULL DEFAULT '#10B981',
+            material_used_grams REAL NOT NULL DEFAULT 0,
+            assigned_user_id INTEGER,
+            assigned_at TEXT,
+            cost_cents INTEGER NOT NULL DEFAULT 0,
+            is_paid INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT,
+            FOREIGN KEY(assigned_user_id) REFERENCES users(id) ON DELETE SET NULL
+          );
+          INSERT INTO print_jobs_migrated (
+            id, printer_id, job_name, status, start_time, end_time, duration_seconds,
+            material_type, material_color_hex, material_used_grams, assigned_user_id,
+            assigned_at, cost_cents, is_paid, metadata_json
+          )
+          SELECT
+            id, printer_id, job_name, status, start_time, end_time, duration_seconds,
+            material_type, material_color_hex, material_used_grams, assigned_user_id,
+            assigned_at, cost_cents, is_paid, metadata_json
+          FROM print_jobs;
+          DROP TABLE print_jobs;
+          ALTER TABLE print_jobs_migrated RENAME TO print_jobs;
+          COMMIT;
+        `);
+        console.log('[PrintJobs DB] Successfully migrated print_jobs table.');
+      } catch (err) {
+        try { db.exec('ROLLBACK;'); } catch {}
+        throw err;
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON;');
+      }
+    }
+
+    const maintSchema = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_logs'")
+      .get() as { sql?: string } | undefined;
+
+    if (maintSchema?.sql && /REFERENCES\s+printers\s*\(\s*id\s*\)\s+ON\s+DELETE\s+CASCADE/i.test(maintSchema.sql)) {
+      console.log('[PrintJobs DB] Migrating maintenance_logs table to remove ON DELETE CASCADE...');
+      db.exec('PRAGMA foreign_keys = OFF;');
+      try {
+        db.exec(`
+          BEGIN TRANSACTION;
+          CREATE TABLE maintenance_logs_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            printer_id TEXT NOT NULL,
+            service_type TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            performed_by TEXT NOT NULL,
+            performed_at TEXT NOT NULL
+          );
+          INSERT INTO maintenance_logs_migrated (id, printer_id, service_type, notes, performed_by, performed_at)
+          SELECT id, printer_id, service_type, notes, performed_by, performed_at FROM maintenance_logs;
+          DROP TABLE maintenance_logs;
+          ALTER TABLE maintenance_logs_migrated RENAME TO maintenance_logs;
+          COMMIT;
+        `);
+      } catch (err) {
+        try { db.exec('ROLLBACK;'); } catch {}
+        throw err;
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON;');
+      }
+    }
+  } catch (err: any) {
+    console.warn('[PrintJobs DB] Schema migration warning:', err.message);
+  }
 }
 
 export function cleanupMockData() {
@@ -130,4 +230,3 @@ function seedInitialData() {
     setSetting.run('currency', 'EUR');
   }
 }
-

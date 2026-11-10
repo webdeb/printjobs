@@ -1,5 +1,6 @@
 import { Printer, PrinterTelemetry, DiscoveredPrinter } from '../../../src/types/index.ts';
 import { PrinterAdapter, JobEvent } from '../types.ts';
+import { validatePort, validatePrinterHost } from '../../utils/security.ts';
 
 interface SnapmakerConnection {
   printer: Printer;
@@ -73,12 +74,13 @@ export class SnapmakerAdapter implements PrinterAdapter {
     const conn = this.connections.get(printerId);
     if (!conn) return;
 
-    const host = conn.printer.host;
-    const port = conn.printer.port || 7125;
+    const hostCheck = validatePrinterHost(conn.printer.host);
+    const port = validatePort(conn.printer.port, 7125);
+    if (!hostCheck.valid || !port) return;
 
     try {
-      const url = `http://${host}:${port}/printer/objects/query?print_stats&extruder&heater_bed`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+      const url = `http://${hostCheck.host}:${port}/printer/objects/query?print_stats&extruder&heater_bed`;
+      const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(2500) });
       if (!res.ok) return;
 
       const data = await res.json();

@@ -2,6 +2,10 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
+import { bodyLimit } from 'hono/body-limit';
+import { serveStatic } from '@hono/node-server/serve-static';
+import fs from 'node:fs';
+import path from 'node:path';
 import { initDatabase, db } from './db/database.ts';
 import { adapterManager } from './adapters/adapterManager.ts';
 import { jobTracker } from './services/jobTracker.ts';
@@ -11,21 +15,85 @@ import { usersRouter } from './routes/users.ts';
 import { maintenanceRouter } from './routes/maintenance.ts';
 import { statsRouter } from './routes/stats.ts';
 import { eventsRouter } from './routes/events.ts';
+import { settingsRouter } from './routes/settings.ts';
 import { Printer } from '../src/types/index.ts';
+import {
+  isAdminPinConfigured,
+  lanBrowserGuard,
+  verifyAdminPin,
+} from './utils/security.ts';
 
 const app = new Hono();
+const isDev = process.env.NODE_ENV !== 'production';
 
 app.use('*', logger());
-app.use('*', cors({
-  origin: '*',
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
-}));
 
-import { settingsRouter } from './routes/settings.ts';
-import { serveStatic } from '@hono/node-server/serve-static';
-import fs from 'node:fs';
-import path from 'node:path';
+// Security response headers (clickjacking, MIME-sniffing, referrer & CSP hardening)
+app.use('*', async (c, next) => {
+  await next();
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('X-Frame-Options', 'DENY');
+  c.header('Referrer-Policy', 'no-referrer');
+
+  let meteOrigin = '';
+  if (process.env.METE_URL) {
+    try {
+      meteOrigin = new URL(process.env.METE_URL).origin;
+    } catch {}
+  }
+  const imgSources = ["'self'", 'data:', 'blob:', meteOrigin].filter(Boolean).join(' ');
+  c.header(
+    'Content-Security-Policy',
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src ${imgSources}; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'`
+  );
+});
+
+// Restrict CORS strictly (no wildcard '*') to prevent LAN drive-by data exfiltration
+app.use(
+  '/api/*',
+  cors({
+    origin: (origin, c) => {
+      if (!origin) return undefined;
+      try {
+        const originUrl = new URL(origin);
+        const host = c.req.header('host');
+        if (host && originUrl.host === host) {
+          return origin;
+        }
+        if (isDev && (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1')) {
+          return origin;
+        }
+      } catch {}
+      return undefined;
+    },
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'X-Admin-Pin'],
+  })
+);
+
+// Protect API against cross-site browser requests & oversized payloads (max 128 KB)
+app.use('/api/*', lanBrowserGuard);
+app.use(
+  '/api/*',
+  bodyLimit({
+    maxSize: 128 * 1024,
+    onError: (c) => c.json({ error: 'Request payload too large (max 128 KB)' }, 413),
+  })
+);
+
+// Auth status & PIN verification endpoints
+app.get('/api/auth/status', (c) => {
+  return c.json({ adminPinRequired: isAdminPinConfigured() });
+});
+
+app.post('/api/auth/verify', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const valid = verifyAdminPin(body?.pin);
+  if (!valid) {
+    return c.json({ valid: false, error: 'Ungültiger Admin-PIN' }, 401);
+  }
+  return c.json({ valid: true });
+});
 
 // Mount API routes
 app.route('/api/printers', printersRouter);
@@ -61,6 +129,12 @@ const PORT = Number(process.env.PORT) || 3001;
 async function bootstrap() {
   console.log('[PrintJobs] Initializing SQLite database...');
   initDatabase();
+
+  if (isAdminPinConfigured()) {
+    console.log('[PrintJobs] Admin-PIN protection is ENABLED for administrative actions.');
+  } else {
+    console.log('[PrintJobs] Admin-PIN protection disabled (set ADMIN_PIN env var to protect admin actions).');
+  }
 
   console.log('[PrintJobs] Starting Adapter Manager & Discovery...');
   await adapterManager.startAll();

@@ -3,6 +3,7 @@ import { db } from '../db/database.ts';
 import { broadcastEvent } from '../services/jobTracker.ts';
 import { calculateCostCents } from '../services/pricing.ts';
 import { PrintJob } from '../../src/types/index.ts';
+import { maskEmail, requireAdminPin } from '../utils/security.ts';
 
 export const jobsRouter = new Hono();
 
@@ -57,27 +58,39 @@ jobsRouter.get('/', (c) => {
 
   const rows = db.prepare(query).all(...params) as any[];
 
-  const jobs: PrintJob[] = rows.map((r) => ({
-    id: r.id,
-    printer_id: r.printer_id,
-    printer_name: r.printer_name,
-    printer_model: r.printer_model,
-    job_name: r.job_name,
-    status: r.status,
-    start_time: r.start_time,
-    end_time: r.end_time,
-    duration_seconds: r.duration_seconds,
-    material_type: r.material_type,
-    material_color_hex: r.material_color_hex,
-    material_used_grams: r.material_used_grams,
-    assigned_user_id: r.assigned_user_id,
-    assigned_user_name: r.assigned_user_name,
-    assigned_user_email: r.assigned_user_email,
-    assigned_at: r.assigned_at,
-    cost_cents: r.cost_cents,
-    is_paid: Boolean(r.is_paid),
-    metadata: r.metadata_json,
-  }));
+  const jobs: PrintJob[] = rows.map((r) => {
+    let fallbackPrinterName = r.printer_name;
+    let fallbackPrinterModel = r.printer_model;
+    if ((!fallbackPrinterName || !fallbackPrinterModel) && r.metadata_json) {
+      try {
+        const meta = JSON.parse(r.metadata_json);
+        fallbackPrinterName = fallbackPrinterName || meta.printerName;
+        fallbackPrinterModel = fallbackPrinterModel || meta.printerModel;
+      } catch {}
+    }
+
+    return {
+      id: r.id,
+      printer_id: r.printer_id,
+      printer_name: fallbackPrinterName,
+      printer_model: fallbackPrinterModel,
+      job_name: r.job_name,
+      status: r.status,
+      start_time: r.start_time,
+      end_time: r.end_time,
+      duration_seconds: r.duration_seconds,
+      material_type: r.material_type,
+      material_color_hex: r.material_color_hex,
+      material_used_grams: r.material_used_grams,
+      assigned_user_id: r.assigned_user_id,
+      assigned_user_name: r.assigned_user_name,
+      assigned_user_email: maskEmail(r.assigned_user_email),
+      assigned_at: r.assigned_at,
+      cost_cents: r.cost_cents,
+      is_paid: Boolean(r.is_paid),
+      metadata: r.metadata_json,
+    };
+  });
 
   return c.json(jobs);
 });
@@ -119,8 +132,8 @@ jobsRouter.post('/:id/assign', async (c) => {
   return c.json({ success: true, jobId: id, userId, userName });
 });
 
-// Toggle or update paid status
-jobsRouter.post('/:id/pay', async (c) => {
+// Toggle or update paid status (protected by ADMIN_PIN if configured)
+jobsRouter.post('/:id/pay', requireAdminPin, async (c) => {
   const id = Number(c.req.param('id'));
   const body = await c.req.json().catch(() => ({}));
   
@@ -185,16 +198,16 @@ jobsRouter.post('/', async (c) => {
   return c.json({ success: true, id: result.lastInsertRowid }, 201);
 });
 
-// Delete a print job
-jobsRouter.delete('/:id', (c) => {
+// Delete a print job (protected by ADMIN_PIN if configured)
+jobsRouter.delete('/:id', requireAdminPin, (c) => {
   const id = Number(c.req.param('id'));
   db.prepare('DELETE FROM print_jobs WHERE id = ?').run(id);
   broadcastEvent('job_deleted', { jobId: id });
   return c.json({ success: true, id });
 });
 
-// Update a print job's material, weight, or cost
-jobsRouter.patch('/:id', async (c) => {
+// Update a print job's material, weight, or cost (protected by ADMIN_PIN if configured)
+jobsRouter.patch('/:id', requireAdminPin, async (c) => {
   const id = Number(c.req.param('id'));
   const body = await c.req.json();
   const job = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(id) as any;
@@ -205,21 +218,27 @@ jobsRouter.patch('/:id', async (c) => {
     if (job.metadata_json) meta = JSON.parse(job.metadata_json);
   } catch {}
 
-  if (body.total_grams !== undefined && !isNaN(Number(body.total_grams))) {
-    meta.totalGrams = Number(body.total_grams);
+  if (body.total_grams !== undefined && !isNaN(Number(body.total_grams)) && Number(body.total_grams) >= 0) {
+    meta.totalGrams = Math.min(50000, Number(body.total_grams));
   }
 
-  const materialType = body.material_type || job.material_type || 'PLA';
+  const materialType = typeof body.material_type === 'string' && body.material_type.trim()
+    ? body.material_type.trim().slice(0, 40)
+    : (job.material_type || 'PLA');
 
-  let materialGrams = body.material_used_grams !== undefined ? Number(body.material_used_grams) : job.material_used_grams;
+  let materialGrams = body.material_used_grams !== undefined
+    ? Math.max(0, Math.min(50000, Number(body.material_used_grams) || 0))
+    : job.material_used_grams;
 
   // If user changed total_grams and didn't lock a fixed manual used_grams, update used_grams according to current progress
   if (body.total_grams !== undefined && body.material_used_grams === undefined && job.status === 'running') {
     const pct = Number(meta.progressPercent) || 0;
-    materialGrams = Math.max(0.5, Math.round((meta.totalGrams * Math.max(pct, 1) / 100) * 10) / 10);
+    materialGrams = pct <= 0 ? 0 : Math.round((meta.totalGrams * (pct / 100)) * 10) / 10;
   }
 
-  const costCents = body.cost_cents !== undefined ? Number(body.cost_cents) : calculateCostCents(materialType, materialGrams);
+  const costCents = body.cost_cents !== undefined
+    ? Math.max(0, Math.min(1000000, Math.round(Number(body.cost_cents) || 0)))
+    : calculateCostCents(materialType, materialGrams);
 
   if (body.material_used_grams !== undefined || body.cost_cents !== undefined) {
     meta.manualOverride = true;

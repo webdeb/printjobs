@@ -1,13 +1,47 @@
 import { db } from '../db/database.ts';
 import { broadcastEvent } from './jobTracker.ts';
 
-const METE_URL = process.env.METE_URL || '';
+const METE_URL = (process.env.METE_URL || '').replace(/\/+$/, '');
 
 export interface MeteUser {
   id: string;
   name: string;
   avatar_url?: string;
   email?: string;
+}
+
+function sanitizeScrapedText(input: string): string {
+  return input
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/<[^>]*>/g, '')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .trim()
+    .slice(0, 100);
+}
+
+/**
+ * Validates that an avatar URL uses HTTP(S) and points strictly to the configured MeTe origin,
+ * blocking javascript:/data: URIs and external tracking pixels.
+ */
+function sanitizeMeteAvatarUrl(rawSrc: string): string | undefined {
+  if (!METE_URL || !rawSrc) return undefined;
+  try {
+    const meteBase = new URL(METE_URL);
+    const resolved = new URL(rawSrc.trim(), meteBase);
+    if (!['http:', 'https:'].includes(resolved.protocol)) {
+      return undefined;
+    }
+    if (resolved.origin !== meteBase.origin) {
+      return undefined;
+    }
+    return resolved.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 export async function fetchMeteUsers(): Promise<MeteUser[]> {
@@ -21,6 +55,7 @@ export async function fetchMeteUsers(): Promise<MeteUser[]> {
     headers: {
       'User-Agent': 'PrintJobs-Makerspace-Sync/1.0',
     },
+    redirect: 'error',
     signal: AbortSignal.timeout(8000),
   });
 
@@ -29,6 +64,9 @@ export async function fetchMeteUsers(): Promise<MeteUser[]> {
   }
 
   const html = await response.text();
+  if (html.length > 5 * 1024 * 1024) {
+    throw new Error('MeTe response payload exceeded 5 MB safety limit.');
+  }
 
   const cardRegex = /<a\s+title="([^"]+)"\s+href="\/users\/(\d+)"[^>]*>[\s\S]*?<div class="card user-card[^>]*>([\s\S]*?)<\/div>\s*<\/a>/g;
   const users: MeteUser[] = [];
@@ -36,16 +74,15 @@ export async function fetchMeteUsers(): Promise<MeteUser[]> {
 
   let match: RegExpExecArray | null;
   while ((match = cardRegex.exec(html)) !== null) {
-    const name = match[1].trim();
+    const name = sanitizeScrapedText(match[1]);
     const id = match[2].trim();
     const innerHtml = match[3];
+    if (!name || !/^\d{1,12}$/.test(id)) continue;
 
     let avatar_url: string | undefined = undefined;
     const imgMatch = innerHtml.match(/src="([^"]+)"/);
     if (imgMatch) {
-      avatar_url = imgMatch[1].startsWith('/')
-        ? `${METE_URL}${imgMatch[1]}`
-        : imgMatch[1];
+      avatar_url = sanitizeMeteAvatarUrl(imgMatch[1]);
     }
 
     if (!seen.has(id)) {
@@ -94,12 +131,12 @@ export async function syncMeteUsers(): Promise<{ success: boolean; total: number
         updateStmt.run(mu.name, mu.avatar_url || null, memberNumber, existingExt.id);
         updated++;
       } else {
-        // Check if matching by name exists
+        // Check if matching by name exists (only if not yet linked to another external_id)
         const existingName = findByName.get(mu.name) as any;
-        if (existingName) {
+        if (existingName && !existingName.external_id) {
           linkStmt.run(mu.id, mu.avatar_url || null, memberNumber, existingName.id);
           updated++;
-        } else {
+        } else if (!existingName) {
           // New member from MeTe
           const fallbackEmail = `mete-${mu.id}@makerspace.local`;
           insertStmt.run(
@@ -139,15 +176,15 @@ export async function syncMeteUsers(): Promise<{ success: boolean; total: number
 let syncInterval: NodeJS.Timeout | undefined;
 
 export function startMeteAutoSync(intervalMinutes = 15): void {
-  // Initial sync immediately in background
   syncMeteUsers().catch((err) => {
     console.warn('[MeTeSync] Initial auto-sync failed (is MeTe reachable?):', err.message);
   });
 
   if (syncInterval) clearInterval(syncInterval);
+  const safeMins = Math.max(1, intervalMinutes);
   syncInterval = setInterval(() => {
     syncMeteUsers().catch((err) => {
       console.warn('[MeTeSync] Periodic sync failed:', err.message);
     });
-  }, intervalMinutes * 60 * 1000);
+  }, safeMins * 60 * 1000);
 }

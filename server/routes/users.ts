@@ -2,10 +2,11 @@ import { Hono } from 'hono';
 import { db } from '../db/database.ts';
 import { broadcastEvent } from '../services/jobTracker.ts';
 import { User } from '../../src/types/index.ts';
+import { maskEmail, requireAdminPin } from '../utils/security.ts';
 
 export const usersRouter = new Hono();
 
-// List all users with aggregated print & Materialkasse stats
+// List all users with aggregated print & Materialkasse stats (PII emails masked)
 usersRouter.get('/', (c) => {
   const users = db.prepare(`
     SELECT 
@@ -24,7 +25,7 @@ usersRouter.get('/', (c) => {
     external_id: u.external_id,
     avatar_url: u.avatar_url,
     name: u.name,
-    email: u.email,
+    email: maskEmail(u.email),
     member_number: u.member_number,
     total_jobs: u.total_jobs,
     total_grams: Math.round(u.total_grams * 10) / 10,
@@ -43,17 +44,19 @@ usersRouter.post('/sync-mete', async (c) => {
     const result = await syncMeteUsers();
     return c.json(result);
   } catch (err: any) {
-    return c.json({ error: 'Failed to sync with MeTe', details: err.message }, 500);
+    return c.json({ error: 'Failed to sync with MeTe' }, 500);
   }
 });
 
 // Create user
 usersRouter.post('/', async (c) => {
   const body = await c.req.json();
-  const { name, email, member_number } = body;
+  const rawName = typeof body.name === 'string' ? body.name.trim() : '';
+  const rawEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+  const rawMemberNum = typeof body.member_number === 'string' ? body.member_number.trim().slice(0, 40) : null;
 
-  if (!name || !email) {
-    return c.json({ error: 'Name and email are required' }, 400);
+  if (!rawName || rawName.length > 100 || !rawEmail || rawEmail.length > 160 || !rawEmail.includes('@')) {
+    return c.json({ error: 'Gültiger Name und E-Mail sind erforderlich.' }, 400);
   }
 
   const now = new Date().toISOString();
@@ -62,12 +65,12 @@ usersRouter.post('/', async (c) => {
       INSERT INTO users (name, email, member_number, created_at)
       VALUES (?, ?, ?, ?)
     `);
-    const res = insert.run(name, email, member_number || null, now);
+    const res = insert.run(rawName, rawEmail, rawMemberNum || null, now);
     const user: User = {
       id: Number(res.lastInsertRowid),
-      name,
-      email,
-      member_number,
+      name: rawName,
+      email: maskEmail(rawEmail),
+      member_number: rawMemberNum || undefined,
       total_jobs: 0,
       total_grams: 0,
       unpaid_cents: 0,
@@ -77,13 +80,13 @@ usersRouter.post('/', async (c) => {
 
     broadcastEvent('user_created', user);
     return c.json(user, 201);
-  } catch (err: any) {
-    return c.json({ error: err.message }, 400);
+  } catch {
+    return c.json({ error: 'Mitglied konnte nicht angelegt werden (E-Mail evtl. bereits vergeben).' }, 400);
   }
 });
 
-// Settle all unpaid jobs for this user (e.g., when they put money in the Materialkasse)
-usersRouter.post('/:id/settle', (c) => {
+// Settle all unpaid jobs for this user (protected by ADMIN_PIN if configured)
+usersRouter.post('/:id/settle', requireAdminPin, (c) => {
   const userId = Number(c.req.param('id'));
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!user) {
@@ -100,13 +103,13 @@ usersRouter.post('/:id/settle', (c) => {
   return c.json({ success: true, userId, settledJobs: result.changes });
 });
 
-// Bulk sync endpoint for external member databases
-usersRouter.post('/sync', async (c) => {
+// Bulk sync endpoint for external member databases (protected by ADMIN_PIN if configured)
+usersRouter.post('/sync', requireAdminPin, async (c) => {
   const body = await c.req.json();
   const members = Array.isArray(body) ? body : body.members;
 
-  if (!Array.isArray(members)) {
-    return c.json({ error: 'Expected array of members' }, 400);
+  if (!Array.isArray(members) || members.length > 5000) {
+    return c.json({ error: 'Expected array of members (max 5000)' }, 400);
   }
 
   const now = new Date().toISOString();
@@ -114,15 +117,20 @@ usersRouter.post('/sync', async (c) => {
   let updated = 0;
 
   for (const m of members) {
-    if (!m.email || !m.name) continue;
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(m.email) as any;
+    if (!m || typeof m.email !== 'string' || typeof m.name !== 'string') continue;
+    const cleanEmail = m.email.trim().toLowerCase().slice(0, 160);
+    const cleanName = m.name.trim().slice(0, 100);
+    const cleanMemberNum = typeof m.member_number === 'string' ? m.member_number.trim().slice(0, 40) : null;
+    if (!cleanEmail || !cleanName) continue;
+
+    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail) as any;
     if (existing) {
       db.prepare('UPDATE users SET name = ?, member_number = ? WHERE id = ?')
-        .run(m.name, m.member_number || null, existing.id);
+        .run(cleanName, cleanMemberNum, existing.id);
       updated++;
     } else {
       db.prepare('INSERT INTO users (name, email, member_number, created_at) VALUES (?, ?, ?, ?)')
-        .run(m.name, m.email, m.member_number || null, now);
+        .run(cleanName, cleanEmail, cleanMemberNum, now);
       added++;
     }
   }

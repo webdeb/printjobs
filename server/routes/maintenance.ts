@@ -42,7 +42,14 @@ maintenanceRouter.post('/', async (c) => {
   const body = await c.req.json();
   const { printer_id, service_type, notes, performed_by } = body;
 
-  if (!printer_id || !service_type || !notes) {
+  const cleanPrinterId = typeof printer_id === 'string' ? printer_id.trim().slice(0, 64) : '';
+  const cleanServiceType = typeof service_type === 'string' ? service_type.trim().slice(0, 80) : '';
+  const cleanNotes = typeof notes === 'string' ? notes.trim().slice(0, 2000) : '';
+  const cleanPerformedBy = typeof performed_by === 'string' && performed_by.trim()
+    ? performed_by.trim().slice(0, 80)
+    : 'Makerspace Mitglied';
+
+  if (!cleanPrinterId || !cleanServiceType || !cleanNotes) {
     return c.json({ error: 'printer_id, service_type, and notes are required' }, 400);
   }
 
@@ -53,19 +60,19 @@ maintenanceRouter.post('/', async (c) => {
   `);
 
   const result = insert.run(
-    printer_id,
-    service_type,
-    notes,
-    performed_by || 'Makerspace Mitglied',
+    cleanPrinterId,
+    cleanServiceType,
+    cleanNotes,
+    cleanPerformedBy,
     now
   );
 
   const entry: MaintenanceLog = {
     id: Number(result.lastInsertRowid),
-    printer_id,
-    service_type,
-    notes,
-    performed_by: performed_by || 'Makerspace Mitglied',
+    printer_id: cleanPrinterId,
+    service_type: cleanServiceType,
+    notes: cleanNotes,
+    performed_by: cleanPerformedBy,
     performed_at: now,
   };
 

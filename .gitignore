@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# Local debug scripts
+scripts/
+
 # Local SQLite database & camera snapshot cache
 data/
 camera_cache/

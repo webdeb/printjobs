@@ -6,6 +6,8 @@ services:
     image: ${DOCKER_IMAGE:-ghcr.io/webdeb/printjobs:latest}
     container_name: printjobs
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Web UI & REST API
       - "${PORT:-3001}:3001"
@@ -16,32 +18,16 @@ services:
       - PORT=3001
       - DB_PATH=/data/printjobs.sqlite
       - CACHE_DIR=/data/camera_cache
-      # MeTe Member Management System URL & Interval
-      - METE_URL=${METE_URL:-http://192.168.10.194:1337}
+      # Optionaler Admin-PIN zum Schutz von Drucker-, Preis- und Kassenverwaltung
+      - ADMIN_PIN=${ADMIN_PIN:-}
+      # MeTe Member Management System URL & Interval (in .env konfigurieren)
+      - METE_URL=${METE_URL:-}
       - METE_SYNC_INTERVAL_MINS=${METE_SYNC_INTERVAL_MINS:-15}
     volumes:
       # Persistent SQLite Database & camera snapshot cache
       - ./data:/data
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
     # TIPP: Auf Linux-Servern kann 'network_mode: host' aktiviert werden,
     # um automatische SSDP-Multicast-Erkennung für Bambu-Drucker im LAN zu ermöglichen.
     # (In dem Fall die 'ports:'-Sektion oben auskommentieren).
     network_mode: host
-
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: printjobs-watchtower
-    restart: unless-stopped
-    environment:
-      # Kompatibilität mit aktuellen Docker Engine Versionen (25+)
-      - DOCKER_API_VERSION=1.44
-      # Nur Container mit dem Label 'com.centurylinklabs.watchtower.enable=true' updaten
-      - WATCHTOWER_LABEL_ENABLE=true
-      # Alte, nicht mehr genutzte Images automatisch aufräumen
-      - WATCHTOWER_CLEANUP=true
-      # Prüf-Intervall in Sekunden (300 = alle 5 Minuten)
-      - WATCHTOWER_POLL_INTERVAL=${WATCHTOWER_POLL_INTERVAL:-300}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock

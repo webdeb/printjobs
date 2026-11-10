@@ -1,6 +1,35 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Printer, PrintJob, User, MakerspaceStats, MaintenanceLog, DiscoveredPrinter } from '../types/index.ts';
 
+const ADMIN_PIN_STORAGE_KEY = 'printjobs_admin_pin';
+
+async function adminFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const getHeaders = (pin?: string | null) => {
+    const h = new Headers(init.headers || {});
+    if (pin) h.set('X-Admin-Pin', pin);
+    return h;
+  };
+
+  const savedPin = sessionStorage.getItem(ADMIN_PIN_STORAGE_KEY);
+  let res = await fetch(url, { ...init, headers: getHeaders(savedPin) });
+
+  if (res.status === 401) {
+    sessionStorage.removeItem(ADMIN_PIN_STORAGE_KEY);
+    const enteredPin = window.prompt('Für diese Aktion ist der Makerspace Admin-PIN erforderlich:');
+    if (!enteredPin) {
+      return res;
+    }
+    res = await fetch(url, { ...init, headers: getHeaders(enteredPin) });
+    if (res.ok) {
+      sessionStorage.setItem(ADMIN_PIN_STORAGE_KEY, enteredPin);
+    } else if (res.status === 401) {
+      window.alert('Ungültiger Admin-PIN.');
+    }
+  }
+
+  return res;
+}
+
 export function usePrinterData() {
   const [printers, setPrinters] = useState<Printer[]>([]);
   const [jobs, setJobs] = useState<PrintJob[]>([]);
@@ -210,7 +239,7 @@ export function usePrinterData() {
   };
 
   const toggleJobPaid = async (jobId: number, isPaid?: boolean) => {
-    const res = await fetch(`/api/jobs/${jobId}/pay`, {
+    const res = await adminFetch(`/api/jobs/${jobId}/pay`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_paid: isPaid }),
@@ -219,7 +248,7 @@ export function usePrinterData() {
   };
 
   const settleUser = async (userId: number) => {
-    const res = await fetch(`/api/users/${userId}/settle`, { method: 'POST' });
+    const res = await adminFetch(`/api/users/${userId}/settle`, { method: 'POST' });
     const data = await res.json();
     fetchData();
     return data;
@@ -260,18 +289,22 @@ export function usePrinterData() {
   };
 
   const addPrinter = async (printerData: Partial<Printer>) => {
-    const res = await fetch('/api/printers', {
+    const res = await adminFetch('/api/printers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(printerData),
     });
     const data = await res.json();
+    if (!res.ok && data?.error) {
+      window.alert(data.error);
+      throw new Error(data.error);
+    }
     fetchData();
     return data;
   };
 
   const deletePrinter = async (printerId: string) => {
-    const res = await fetch(`/api/printers/${printerId}`, { method: 'DELETE' });
+    const res = await adminFetch(`/api/printers/${printerId}`, { method: 'DELETE' });
     const data = await res.json();
     fetchData();
     return data;
@@ -289,26 +322,29 @@ export function usePrinterData() {
   };
 
   const deleteJob = async (jobId: number) => {
-    const res = await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+    const res = await adminFetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
     const data = await res.json();
     fetchData();
     return data;
   };
 
   const updatePrices = async (newPrices: Record<string, number>) => {
-    const res = await fetch('/api/settings/prices', {
+    const res = await adminFetch('/api/settings/prices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newPrices),
     });
     const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || 'Unauthorized');
+    }
     if (data.prices) setPrices(data.prices);
     fetchData();
     return data;
   };
 
   const updateJobDetails = async (jobId: number, data: { material_type?: string; material_used_grams?: number; cost_cents?: number; total_grams?: number }) => {
-    const res = await fetch(`/api/jobs/${jobId}`, {
+    const res = await adminFetch(`/api/jobs/${jobId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
